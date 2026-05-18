@@ -9,7 +9,9 @@
 #include "hap_apple_servs.h"
 
 #include "app_settings.h"
+#include "led_indicator.h"
 #include "stepper.h"
+#include "webui.h"
 
 static const char *TAG = "homekit";
 
@@ -105,9 +107,33 @@ void homekit_service_publish_current(int32_t steps, bool moving)
     hap_char_update_val(s_c_state, &st);
 }
 
+/* HomeKit lifecycle events: pairing state changes update the LED + Web UI. */
+static void hap_event_handler(hap_event_t event, void *data)
+{
+    switch (event) {
+    case HAP_EVENT_PAIRING_STARTED:
+        ESP_LOGI(TAG, "HK pairing started");
+        break;
+    case HAP_EVENT_PAIRING_ABORTED:
+        ESP_LOGW(TAG, "HK pairing aborted");
+        break;
+    case HAP_EVENT_CTRL_PAIRED:
+    case HAP_EVENT_CTRL_UNPAIRED: {
+        int n = hap_get_paired_controller_count();
+        ESP_LOGI(TAG, "HK paired controller count = %d", n);
+        led_indicator_set_paired(n > 0);
+        webui_set_hk_paired(n > 0);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 esp_err_t homekit_service_start(void)
 {
     hap_init(HAP_TRANSPORT_WIFI);
+    hap_register_event_handler(hap_event_handler);
 
     const app_settings_t *cfg = app_settings_get();
 
@@ -150,5 +176,13 @@ esp_err_t homekit_service_start(void)
     int rc = hap_start();
     ESP_LOGI(TAG, "HAP started (rc=%d) name='%s' code='%s'",
              rc, cfg->accessory_name, cfg->hap_setup_code);
+
+    /* Initialise the UI state from whatever pairings already exist
+     * (e.g. after a reboot, we may already be paired). */
+    int n = hap_get_paired_controller_count();
+    led_indicator_set_paired(n > 0);
+    webui_set_hk_paired(n > 0);
+    ESP_LOGI(TAG, "initial paired controller count = %d", n);
+
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }

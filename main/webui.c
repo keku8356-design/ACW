@@ -137,16 +137,6 @@ static int json_get_int(const char *body, const char *key, int dflt)
     return (int)strtol(p + 1, NULL, 10);
 }
 
-static bool json_get_bool(const char *body, const char *key, bool dflt)
-{
-    const char *p = find_key(body, key);
-    if (!p) return dflt;
-    p = strchr(p, ':');
-    if (!p) return dflt;
-    while (*++p == ' ');
-    return strncmp(p, "true", 4) == 0;
-}
-
 static bool json_get_str(const char *body, const char *key, char *out, size_t outsz)
 {
     const char *p = find_key(body, key);
@@ -185,23 +175,25 @@ static esp_err_t h_index(httpd_req_t *r)
 static esp_err_t h_status(httpd_req_t *r)
 {
     const app_settings_t *cfg = app_settings_get();
-    int32_t pos    = stepper_get_position();
+    int32_t pos    = stepper_get_position();          /* primary (left) */
     int32_t tgt    = stepper_get_target();
+    int32_t pos_l  = stepper_get_motor_position(MOTOR_LEFT);
+    int32_t pos_r  = stepper_get_motor_position(MOTOR_RIGHT);
     int32_t full   = cfg->full_open_steps;
     int     pct    = full > 0 ? (int)((int64_t)pos * 100 / full) : 0;
     int     pct_t  = full > 0 ? (int)((int64_t)tgt * 100 / full) : 0;
-    if (pct < 0)   pct = 0;
-    if (pct > 100)   pct = 100;
-    if (pct_t < 0) pct_t = 0;
-    if (pct_t > 100) pct_t = 100;
+    if (pct < 0)   pct = 0; if (pct > 100)   pct = 100;
+    if (pct_t < 0) pct_t = 0; if (pct_t > 100) pct_t = 100;
 
-    char buf[512];
+    char buf[640];
     int n = snprintf(buf, sizeof(buf),
         "{\"position\":%d,\"target\":%d,\"full_open\":%d,"
+        "\"position_left\":%d,\"position_right\":%d,"
         "\"percent\":%d,\"target_percent\":%d,\"moving\":%s,"
         "\"step_period_us\":%u,\"hold_when_stopped\":%s,"
         "\"hk_paired\":%s,\"name\":\"%s\",\"setup_code\":\"%s\"}",
         (int)pos, (int)tgt, (int)full,
+        (int)pos_l, (int)pos_r,
         pct, pct_t,
         stepper_is_moving() ? "true" : "false",
         (unsigned)cfg->step_period_us,
@@ -215,10 +207,17 @@ static esp_err_t h_status(httpd_req_t *r)
 
 static esp_err_t h_jog(httpd_req_t *r)
 {
-    char body[128];
+    char body[160];
     if (read_body(r, body, sizeof(body)) != ESP_OK) return httpd_resp_send_500(r);
-    int steps = json_get_int(body, "steps", 0);
-    if (steps) stepper_jog(steps);
+    int  steps = json_get_int(body, "steps", 0);
+    char which[16] = {0};
+    json_get_str(body, "motor", which, sizeof(which));
+
+    motor_id_t m = MOTOR_BOTH;
+    if      (!strcmp(which, "left"))  m = MOTOR_LEFT;
+    else if (!strcmp(which, "right")) m = MOTOR_RIGHT;
+
+    if (steps) stepper_jog_motor(m, steps);
     httpd_resp_set_type(r, "application/json");
     return httpd_resp_sendstr(r, "{\"ok\":true}");
 }
@@ -245,23 +244,41 @@ static esp_err_t h_stop(httpd_req_t *r)
 
 static esp_err_t h_calibrate(httpd_req_t *r)
 {
-    char body[128];
+    char body[160];
     if (read_body(r, body, sizeof(body)) != ESP_OK) return httpd_resp_send_500(r);
     char act[32] = {0};
+    char which[16] = {0};
     json_get_str(body, "action", act, sizeof(act));
+    json_get_str(body, "motor",  which, sizeof(which));
+
+    motor_id_t m = MOTOR_BOTH;
+    if      (!strcmp(which, "left"))  m = MOTOR_LEFT;
+    else if (!strcmp(which, "right")) m = MOTOR_RIGHT;
+
     if (!strcmp(act, "set_zero")) {
-        stepper_set_position(0);
-        app_settings_set_last_position(0);
-        ESP_LOGI(TAG, "calibrated: ZERO");
+        stepper_set_position(m, 0);
+        if (m == MOTOR_BOTH) app_settings_set_last_position(0);
+        ESP_LOGI(TAG, "calibrated: ZERO (%s)",
+                 m == MOTOR_LEFT ? "LEFT" : m == MOTOR_RIGHT ? "RIGHT" : "BOTH");
     } else if (!strcmp(act, "set_open")) {
-        /* Use the current step count as the new "100% open" reference,
-         * and slide the zero to keep the current physical position == full_open. */
-        int32_t pos = stepper_get_position();
+        /* "100% open" is a single number shared by both motors. We base it on
+         * the LEFT motor's current step count (the primary position). After
+         * calibration, both motors are claimed to be at full_open. */
+        int32_t pos = stepper_get_motor_position(MOTOR_LEFT);
         if (pos < 100) pos = 100;
         app_settings_set_full_open(pos);
+        stepper_set_position(MOTOR_BOTH, pos);   /* claim both at full_open */
+        app_settings_set_last_position(pos);
         ESP_LOGI(TAG, "calibrated: FULL OPEN = %d steps", (int)pos);
+    } else if (!strcmp(act, "sync_here")) {
+        /* User claims both ropes are now at the same physical position --
+         * snap RIGHT's logical count onto LEFT's so future sync moves stay aligned. */
+        int32_t left = stepper_get_motor_position(MOTOR_LEFT);
+        stepper_set_position(MOTOR_RIGHT, left);
+        ESP_LOGI(TAG, "calibrated: synced RIGHT to LEFT = %d", (int)left);
     } else {
-        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "action must be set_zero|set_open");
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST,
+                                   "action must be set_zero|set_open|sync_here");
     }
     httpd_resp_set_type(r, "application/json");
     return httpd_resp_sendstr(r, "{\"ok\":true}");

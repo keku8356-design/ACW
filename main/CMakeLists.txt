@@ -6,6 +6,7 @@ idf_component_register(
         "wifi_manager.c"
         "homekit_service.c"
         "webui.c"
+        "led_indicator.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -19,4 +20,5 @@ idf_component_register(
         driver
         esp_hap_core
         esp_hap_apple_profiles
+        led_strip
 )

@@ -9,108 +9,108 @@
 
 static const char *TAG = "stepper";
 
-/* 8-phase half-step sequence for 28BYJ-48. Each row is the state of IN1..IN4.
- * Going up the table = "forward"; going down = "reverse". The direction
- * mapping to "open/close" is configurable at the application layer -- here
- * we just say positive deltas use forward(). */
+/* 8-phase half-step sequence for 28BYJ-48. */
 static const uint8_t HALF_STEP_SEQ[8][4] = {
-    {1, 0, 0, 0},
-    {1, 1, 0, 0},
-    {0, 1, 0, 0},
-    {0, 1, 1, 0},
-    {0, 0, 1, 0},
-    {0, 0, 1, 1},
-    {0, 0, 0, 1},
-    {1, 0, 0, 1},
+    {1, 0, 0, 0}, {1, 1, 0, 0}, {0, 1, 0, 0}, {0, 1, 1, 0},
+    {0, 0, 1, 0}, {0, 0, 1, 1}, {0, 0, 0, 1}, {1, 0, 0, 1},
 };
 
-static stepper_pins_t   s_pins;
-static esp_timer_handle_t s_timer;
+typedef struct {
+    int32_t pin[4];
+    int     phase;        /* 0..7 in HALF_STEP_SEQ */
+    int32_t current;
+    int32_t target;
+} motor_t;
 
-/* All position state is read/written under s_lock to keep API thread-safe. */
+#define M_LEFT   0
+#define M_RIGHT  1
+
+static motor_t           s_motor[2];
 static SemaphoreHandle_t s_lock;
-static int32_t  s_current;
-static int32_t  s_target;
-static int      s_phase;            /* 0..7 in HALF_STEP_SEQ */
-static uint32_t s_period_us = 1500;
-static bool     s_hold      = false;
-static bool     s_running   = false;
-static stepper_done_cb_t s_done_cb = NULL;
+static esp_timer_handle_t s_timer;
+static bool      s_running   = false;
+static uint32_t  s_period_us = 1500;
+static bool      s_hold      = false;
+static stepper_done_cb_t  s_done_cb  = NULL;
+static stepper_start_cb_t s_start_cb = NULL;
 
-/* --- low-level GPIO helpers ----------------------------------------------- */
+/* --- low-level helpers --------------------------------------------------- */
 
 static void write_phase(const int32_t pin[4], const uint8_t pat[4])
 {
     for (int i = 0; i < 4; ++i) gpio_set_level(pin[i], pat[i]);
 }
 
-static void deenergize(void)
+static void deenergize_motor(int m)
 {
     static const uint8_t zero[4] = {0, 0, 0, 0};
-    write_phase(s_pins.pin_a, zero);
-    write_phase(s_pins.pin_b, zero);
+    write_phase(s_motor[m].pin, zero);
 }
 
-/* Apply the current phase to both motors. Both move in the same direction
- * (i.e. both spool in or both spool out together). If one of your motors
- * is mirrored mechanically, swap any two of its IN pins in wiring. */
-static void apply_phase(void)
+static void deenergize_all(void)
 {
-    const uint8_t *pat = HALF_STEP_SEQ[s_phase];
-    write_phase(s_pins.pin_a, pat);
-    write_phase(s_pins.pin_b, pat);
+    deenergize_motor(M_LEFT);
+    deenergize_motor(M_RIGHT);
 }
 
-/* --- timer-driven stepping ------------------------------------------------- */
-
-static void timer_cb(void *arg)
-{
-    bool finished = false;
-    int32_t finished_pos = 0;
-
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-
-    if (s_current == s_target) {
-        if (!s_hold) deenergize();
-        esp_timer_stop(s_timer);
-        s_running    = false;
-        finished     = true;
-        finished_pos = s_current;
-    } else {
-        int dir = (s_target > s_current) ? +1 : -1;
-        s_phase = (s_phase + dir + 8) & 7;
-        apply_phase();
-        s_current += dir;
-    }
-
-    xSemaphoreGive(s_lock);
-
-    if (finished && s_done_cb) s_done_cb(finished_pos);
-}
-
-/* Start the timer if it isn't already running. Must be called with lock held. */
 static void ensure_running_locked(void)
 {
     if (s_running) return;
     s_running = true;
+    if (s_start_cb) s_start_cb();
     esp_timer_start_periodic(s_timer, s_period_us);
 }
 
-/* --- public API ----------------------------------------------------------- */
+/* --- timer-driven stepping ---------------------------------------------- */
+
+static void timer_cb(void *arg)
+{
+    bool    finished = false;
+    int32_t finished_pos = 0;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+
+    bool any_motion = false;
+    for (int m = 0; m < 2; ++m) {
+        if (s_motor[m].current == s_motor[m].target) continue;
+        int dir = (s_motor[m].target > s_motor[m].current) ? +1 : -1;
+        s_motor[m].phase = (s_motor[m].phase + dir + 8) & 7;
+        write_phase(s_motor[m].pin, HALF_STEP_SEQ[s_motor[m].phase]);
+        s_motor[m].current += dir;
+        any_motion = true;
+    }
+
+    if (!any_motion) {
+        esp_timer_stop(s_timer);
+        s_running = false;
+        if (!s_hold) deenergize_all();
+        finished     = true;
+        finished_pos = s_motor[M_LEFT].current;
+    }
+
+    xSemaphoreGive(s_lock);
+
+    /* Fire callback outside the lock. */
+    if (finished && s_done_cb) s_done_cb(finished_pos);
+}
+
+/* --- public API ---------------------------------------------------------- */
 
 esp_err_t stepper_init(const stepper_pins_t *pins, int32_t start_position)
 {
-    s_pins   = *pins;
-    s_lock   = xSemaphoreCreateMutex();
-    s_current = start_position;
-    s_target  = start_position;
-    s_phase   = 0;
+    s_lock = xSemaphoreCreateMutex();
+    memcpy(s_motor[M_LEFT].pin,  pins->pin_left,  sizeof(pins->pin_left));
+    memcpy(s_motor[M_RIGHT].pin, pins->pin_right, sizeof(pins->pin_right));
+    for (int m = 0; m < 2; ++m) {
+        s_motor[m].phase   = 0;
+        s_motor[m].current = start_position;
+        s_motor[m].target  = start_position;
+    }
 
     uint64_t mask = 0;
-    for (int i = 0; i < 4; ++i) {
-        mask |= 1ULL << s_pins.pin_a[i];
-        mask |= 1ULL << s_pins.pin_b[i];
-    }
+    for (int m = 0; m < 2; ++m)
+        for (int i = 0; i < 4; ++i)
+            mask |= 1ULL << s_motor[m].pin[i];
     gpio_config_t cfg = {
         .pin_bit_mask = mask,
         .mode         = GPIO_MODE_OUTPUT,
@@ -119,7 +119,7 @@ esp_err_t stepper_init(const stepper_pins_t *pins, int32_t start_position)
         .intr_type    = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&cfg));
-    deenergize();
+    deenergize_all();
 
     const esp_timer_create_args_t targs = {
         .callback        = timer_cb,
@@ -128,9 +128,11 @@ esp_err_t stepper_init(const stepper_pins_t *pins, int32_t start_position)
     };
     ESP_ERROR_CHECK(esp_timer_create(&targs, &s_timer));
 
-    ESP_LOGI(TAG, "init: pinsA=%d,%d,%d,%d pinsB=%d,%d,%d,%d start=%d",
-             (int)pins->pin_a[0], (int)pins->pin_a[1], (int)pins->pin_a[2], (int)pins->pin_a[3],
-             (int)pins->pin_b[0], (int)pins->pin_b[1], (int)pins->pin_b[2], (int)pins->pin_b[3],
+    ESP_LOGI(TAG, "init: L=%d,%d,%d,%d  R=%d,%d,%d,%d  start=%d",
+             (int)pins->pin_left[0],  (int)pins->pin_left[1],
+             (int)pins->pin_left[2],  (int)pins->pin_left[3],
+             (int)pins->pin_right[0], (int)pins->pin_right[1],
+             (int)pins->pin_right[2], (int)pins->pin_right[3],
              (int)start_position);
     return ESP_OK;
 }
@@ -138,42 +140,81 @@ esp_err_t stepper_init(const stepper_pins_t *pins, int32_t start_position)
 void stepper_move_to(int32_t target)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_target = target;
-    if (s_current != s_target) ensure_running_locked();
+    s_motor[M_LEFT ].target = target;
+    s_motor[M_RIGHT].target = target;
+    if (s_motor[M_LEFT ].current != target ||
+        s_motor[M_RIGHT].current != target) {
+        ensure_running_locked();
+    }
     xSemaphoreGive(s_lock);
-    ESP_LOGI(TAG, "move_to: %d (from %d)", (int)target, (int)s_current);
+    ESP_LOGI(TAG, "move_to %d (L=%d R=%d)",
+             (int)target,
+             (int)s_motor[M_LEFT].current,
+             (int)s_motor[M_RIGHT].current);
 }
 
-void stepper_jog(int32_t delta)
+void stepper_jog_motor(motor_id_t which, int32_t delta)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_target += delta;
-    if (s_current != s_target) ensure_running_locked();
+    if (which == MOTOR_BOTH || which == MOTOR_LEFT)  s_motor[M_LEFT ].target += delta;
+    if (which == MOTOR_BOTH || which == MOTOR_RIGHT) s_motor[M_RIGHT].target += delta;
+    if (s_motor[M_LEFT ].current != s_motor[M_LEFT ].target ||
+        s_motor[M_RIGHT].current != s_motor[M_RIGHT].target) {
+        ensure_running_locked();
+    }
     xSemaphoreGive(s_lock);
-    ESP_LOGI(TAG, "jog: %+d -> target=%d", (int)delta, (int)s_target);
+    ESP_LOGI(TAG, "jog %s %+d -> L_t=%d R_t=%d",
+             (which == MOTOR_LEFT)  ? "LEFT"  :
+             (which == MOTOR_RIGHT) ? "RIGHT" : "BOTH",
+             (int)delta,
+             (int)s_motor[M_LEFT].target,
+             (int)s_motor[M_RIGHT].target);
 }
+
+void stepper_jog(int32_t delta) { stepper_jog_motor(MOTOR_BOTH, delta); }
 
 void stepper_stop(void)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_timer_stop(s_timer);
     s_running = false;
-    s_target  = s_current;
-    if (!s_hold) deenergize();
+    s_motor[M_LEFT ].target = s_motor[M_LEFT ].current;
+    s_motor[M_RIGHT].target = s_motor[M_RIGHT].current;
+    if (!s_hold) deenergize_all();
     xSemaphoreGive(s_lock);
 }
 
-int32_t stepper_get_position(void) { return s_current; }
-int32_t stepper_get_target  (void) { return s_target;  }
+int32_t stepper_get_position(void) { return s_motor[M_LEFT].current; }
+int32_t stepper_get_target  (void) { return s_motor[M_LEFT].target;  }
 bool    stepper_is_moving   (void) { return s_running; }
 
-void stepper_set_position(int32_t pos)
+int32_t stepper_get_motor_position(motor_id_t w)
+{
+    if (w == MOTOR_RIGHT) return s_motor[M_RIGHT].current;
+    return s_motor[M_LEFT].current;                      /* BOTH / LEFT */
+}
+int32_t stepper_get_motor_target(motor_id_t w)
+{
+    if (w == MOTOR_RIGHT) return s_motor[M_RIGHT].target;
+    return s_motor[M_LEFT].target;
+}
+
+void stepper_set_position(motor_id_t which, int32_t pos)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_current = pos;
-    s_target  = pos;
+    if (which == MOTOR_BOTH || which == MOTOR_LEFT) {
+        s_motor[M_LEFT].current = pos;
+        s_motor[M_LEFT].target  = pos;
+    }
+    if (which == MOTOR_BOTH || which == MOTOR_RIGHT) {
+        s_motor[M_RIGHT].current = pos;
+        s_motor[M_RIGHT].target  = pos;
+    }
     xSemaphoreGive(s_lock);
-    ESP_LOGI(TAG, "set_position(teach): %d", (int)pos);
+    ESP_LOGI(TAG, "set_position %s = %d",
+             (which == MOTOR_LEFT)  ? "LEFT"  :
+             (which == MOTOR_RIGHT) ? "RIGHT" : "BOTH",
+             (int)pos);
 }
 
 void stepper_set_period(uint32_t us)
@@ -181,7 +222,6 @@ void stepper_set_period(uint32_t us)
     if (us < 900)   us = 900;
     if (us > 20000) us = 20000;
     s_period_us = us;
-    /* If currently moving, restart timer with the new period. */
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_running) {
         esp_timer_stop(s_timer);
@@ -195,9 +235,10 @@ void stepper_set_hold(bool hold)
     s_hold = hold;
     if (!hold) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        if (!s_running) deenergize();
+        if (!s_running) deenergize_all();
         xSemaphoreGive(s_lock);
     }
 }
 
-void stepper_register_done_cb(stepper_done_cb_t cb) { s_done_cb = cb; }
+void stepper_register_done_cb (stepper_done_cb_t  cb) { s_done_cb  = cb; }
+void stepper_register_start_cb(stepper_start_cb_t cb) { s_start_cb = cb; }
