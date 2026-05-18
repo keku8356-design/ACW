@@ -14,8 +14,9 @@ idf_component_register(
         esp_event
         esp_http_server
         esp_timer
-        json
+        esp_hw_support
         mdns
         driver
-        homekit
+        esp_hap_core
+        esp_hap_apple_profiles
 )

@@ -190,8 +190,10 @@ static esp_err_t h_status(httpd_req_t *r)
     int32_t full   = cfg->full_open_steps;
     int     pct    = full > 0 ? (int)((int64_t)pos * 100 / full) : 0;
     int     pct_t  = full > 0 ? (int)((int64_t)tgt * 100 / full) : 0;
-    if (pct < 0)   pct = 0; if (pct > 100)   pct = 100;
-    if (pct_t < 0) pct_t = 0; if (pct_t > 100) pct_t = 100;
+    if (pct < 0)   pct = 0;
+    if (pct > 100)   pct = 100;
+    if (pct_t < 0) pct_t = 0;
+    if (pct_t > 100) pct_t = 100;
 
     char buf[512];
     int n = snprintf(buf, sizeof(buf),

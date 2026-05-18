@@ -1,7 +1,8 @@
 ## ESP-IDF component manager manifest
+## NOTE: json_parser / json_generator are bundled by esp-homekit-sdk under
+## components/homekit/. Declaring them here as "espressif/json_*" would cause
+## a "Multiple candidates" error.
 dependencies:
   idf:
     version: ">=5.0"
   espressif/mdns: "^1.2.0"
-  espressif/json_generator: "*"
-  espressif/json_parser: "*"
