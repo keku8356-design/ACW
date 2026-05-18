@@ -1,0 +1,34 @@
+# Target chip
+CONFIG_IDF_TARGET="esp32c3"
+
+# Partition table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Reduce log spam in release
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# FreeRTOS tick at 1kHz makes 1ms-resolution delays clean
+CONFIG_FREERTOS_HZ=1000
+
+# Main task stack a bit larger - HomeKit + http need room
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# HTTP server tunables: we serve a small SPA + a websocket
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# WiFi - allow both STA and AP simultaneously for the SoftAP fallback
+CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+
+# LWIP - mDNS needs multicast
+CONFIG_LWIP_IGMP_TIMERS_ONDEMAND=y
+
+# Enable USB Serial JTAG console (for debugging over the C-3's native USB port)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# HomeKit SDK options
+CONFIG_HAP_MFI_ENABLE=n

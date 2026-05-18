@@ -1,0 +1,7 @@
+## ESP-IDF component manager manifest
+dependencies:
+  idf:
+    version: ">=5.0"
+  espressif/mdns: "^1.2.0"
+  espressif/json_generator: "*"
+  espressif/json_parser: "*"
