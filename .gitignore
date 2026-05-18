@@ -1,0 +1,87 @@
+# =========================================
+# ESP-IDF 构建产物（编译生成，不需要提交）
+# =========================================
+build/
+**/build/
+managed_components/
+dependencies.lock
+sdkconfig.old
+
+# 注意：sdkconfig（不带 .old）是项目配置，必须提交，不在这里排除
+
+# 单独的编译产物（保险起见，即使不在 build/ 里也忽略）
+*.o
+*.a
+*.out
+*.exe
+
+# =========================================
+# CMake 生成文件
+# =========================================
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# =========================================
+# Python 缓存和虚拟环境
+# =========================================
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+venv/
+.venv/
+env/
+
+# =========================================
+# 语言服务器 / 代码索引（本机生成）
+# =========================================
+.clangd/
+.ccls-cache/
+compile_commands.json
+
+# =========================================
+# VSCode 本机配置（每台电脑路径不同，不要同步）
+# =========================================
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/
+
+# 保留 .vscode/extensions.json 等共享配置不被排除（如果有的话）
+
+# =========================================
+# 编辑器临时文件 / 备份
+# =========================================
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+*.log
+
+# =========================================
+# 用户级配置文件（IDE）
+# =========================================
+*.user
+*.workspace
+*.suo
+*.sln.docstates
+
+# =========================================
+# 操作系统垃圾文件
+# =========================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
