@@ -1,179 +1,293 @@
-# Aircover
+# AirCover
 
-ESP32-C3 驱动两个 28BYJ-48 步进电机（配 ULN2003）卷线，把塑料袋导风口的上边缘拉起或放下，引导空调出风。**接入 HomeKit**，同时提供一个**全功能远程 Web 控制面板**用于调试、标定、配置——挂上空调后再不需要拆下来碰它。
+> ESP32-C3 firmware that mechanically reshapes the airflow from a wall-mounted air conditioner via a soft plastic deflector, with HomeKit and a self-hosted web console.
 
-> ESP-IDF 5.5+ &nbsp;·&nbsp; HomeKit Window Covering 服务 &nbsp;·&nbsp; SoftAP 兜底配网 &nbsp;·&nbsp; WebSocket 实时日志
+夏天空调直吹人冷得难受，但拆装导风片麻烦又难看。AirCover 用两个 28BYJ-48 步进电机卷起一个透明塑料袋的上沿，把出风口的风形偏到任意角度——挂上去之后**再不需要碰它**：苹果"家庭" App 里一条滑块、或者打开浏览器进控制台都能用。
+
+**Status**: ✅ 在用 · 已 HomeKit 配对成功 · OTA 远程升级可用
 
 ---
 
-## 1. 硬件接线
+## ✨ Features
 
-| 信号 | 引脚 | 说明 |
+- 🏠 **HomeKit Window Covering 服务** — 在"家庭" App 显示为 0–100% 滑块，Siri 可控
+- 🌐 **完整 Web 控制台** — `http://aircover.local`，含点动、标定、配置、实时日志、OTA 全功能
+- 📶 **SoftAP 兜底配网** — 没存 WiFi / 连不上时自动开热点 `AirCover-Setup`，浏览器配网
+- 🔄 **远程 OTA 升级** — 双 OTA 槽，Web UI 上传 `.bin`，写入备份槽校验后切换，不会变砖
+- 💡 **WS2812 RGB 状态指示** — gamma 校正 + 40Hz 渲染 + 余弦呼吸 + 1s 光谱过渡
+- 🧲 **位置吸附 (detent)** — 可选的离散方位角，防止双电机长期使用后位置漂移
+- 🔧 **NVS 平滑迁移** — 固件升级新增配置项不会清除现有设置
+- 🛡️ **掉电恢复** — 位置记忆持久化，重启后从上次位置继续
+
+---
+
+## 📦 Hardware
+
+### 物料清单
+
+| 数量 | 元件 | 说明 |
 |---|---|---|
-| 电机 A IN1..IN4 | GPIO **0 / 1 / 3 / 4** | 接 ULN2003 板 A 的 IN1..IN4 |
-| 电机 B IN1..IN4 | GPIO **5 / 6 / 7 / 10** | 接 ULN2003 板 B 的 IN1..IN4 |
-| BOOT 按键 | GPIO 9（板载） | 长按 **10 秒**触发恢复出厂 |
-| 状态 LED | GPIO 8（板载） | 上电常亮 → 慢闪连 WiFi → 快闪等待配网 → 灭代表 idle |
+| 1 | **ESP32-C3** 开发板 | 带板载 USB-Serial-JTAG 和 WS2812 RGB LED（如 ESP32-C3-DevKitM-1、超核 C3 Mini 等） |
+| 2 | **28BYJ-48** 步进电机 | 5V 版本，自带 4 线 |
+| 2 | **ULN2003** 驱动板 | 跟 28BYJ-48 配套的红色小板 |
+| 1 | 5V 电源 | USB 5V 即可（>500mA），不要从 ESP32 的 3V3 取 |
+| - | 杜邦线、塑料袋、卷线轴 | 机械部分自由发挥 |
 
-**供电**：
-- ULN2003 + 28BYJ-48 用 **5V**（USB 5V 即可，但不要从 ESP32-C3 的 3V3 取电）
-- ESP32-C3、两块 ULN2003 板、5V 电源**共地必须**
-- 两块 ULN2003 板的 5V 各自接一起即可
+### 接线
 
-**关于丢失的功能**：电机用 GPIO 4/5/6/7 占用了 pin-based JTAG，但 ESP32-C3 的 **USB-Serial-JTAG**（type-C 数据线即可）仍可正常 JTAG 调试，不受影响。
+| 信号 | GPIO | 接到 |
+|---|---|---|
+| 左电机 IN1–IN4 | **4 / 5 / 6 / 7** | ULN2003 (A) 的 IN1–IN4 |
+| 右电机 IN1–IN4 | **0 / 1 / 3 / 10** | ULN2003 (B) 的 IN1–IN4 |
+| BOOT 按键 | 9 (板载) | — |
+| WS2812 状态 LED | 8 (板载) | — |
+
+> ⚠️ **供电要点**：两块 ULN2003 的 5V 用外部 5V 电源（不要走 ESP32 的 3V3 上行），ESP32、两块 ULN2003、电源必须**共地**。
+
+> 💡 **JTAG 仍可用**：虽然 GPIO 4/5/6/7 占用了传统 pin-based JTAG，但 ESP32-C3 内置 **USB-Serial-JTAG**，用 Type-C 数据线就能调试。
 
 ---
 
-## 2. 编译
+## 🚀 Quick Start
 
-### 2.1 拉取 esp-homekit-sdk
+### 1. 环境准备
 
-在 `aircover` 的**父目录**执行：
+需要 **ESP-IDF 5.5+**。如果还没装：
+
 ```bash
+# Linux/macOS
+git clone -b v5.5 --recursive https://github.com/espressif/esp-idf.git
+cd esp-idf && ./install.sh esp32c3 && . ./export.sh
+```
+
+Windows 用户用 [ESP-IDF Installer](https://dl.espressif.com/dl/esp-idf/) 安装即可。
+
+### 2. 拉取 esp-homekit-sdk
+
+本项目依赖 Espressif 的 HomeKit SDK，需要单独 clone：
+
+```bash
+cd /path/to/parent
 git clone --recursive https://github.com/espressif/esp-homekit-sdk.git
 ```
 
-最终结构：
-```
-your-workspace/
-├── aircover/             # 本项目
-└── esp-homekit-sdk/      # 与本项目并列
-```
+默认会从 `../esp-homekit-sdk` 寻找。如果放别处，编译时加 `-DHOMEKIT_PATH=/your/path`。
 
-如要放别处，编译时用 `-DHOMEKIT_PATH=/abs/path/to/esp-homekit-sdk`。
-
-### 2.2 设置目标芯片并编译
+### 3. 编译 & 烧录
 
 ```bash
+git clone https://github.com/<you>/aircover.git
 cd aircover
 idf.py set-target esp32c3
-idf.py build
-idf.py -p /dev/cu.usbmodemXXXX flash monitor
+idf.py -p /dev/ttyUSB0 flash monitor   # Windows: -p COM3
 ```
 
-> 烧录后 `monitor` 输出里会打印 `HomeKit setup code: 111-22-333`，**第一次配对**就用这个 8 位数字（可在 Web UI 改）。
+烧录后在串口看到：
 
-> **分区表升级（从老版本 factory 分区升级到 OTA 双槽）**：本项目改用 OTA 双槽分区表后，**最后一次需要串口烧录**才能切换。之后所有更新都可通过 Web UI 远程刷写。`idf.py flash` 会自动重写分区表和 NVS 区，**WiFi 凭证和 HomeKit 配对会丢**，需要重新配网和配对一次。再之后就纯远程 OTA，不丢配置。
-
-### 2.3 远程 OTA 升级
-
-每次代码修改后：
-
-```bash
-idf.py build
+```
+I (xxx) homekit: HomeKit setup code: 111-22-333
 ```
 
-然后在浏览器打开 `http://aircover.local` → **FIRMWARE UPDATE** 面板：
+记下这个 8 位数字，后面 iOS 配对要用。
 
-1. 点 "Choose File"，选 `build/aircover.bin`
-2. 点 **UPLOAD & FLASH**，确认对话框
-3. 进度条走完后设备自动重启，5 秒后页面恢复
+> 💾 **关于 NVS 区**：首次烧录会重写整个 flash（包括 NVS），所以 WiFi、HomeKit 配对、标定**全部清空**。之后所有更新走 OTA 就不会丢配置了。
 
-OTA 行为：
-- 固件写入**未激活**的 OTA 槽（ota_0 / ota_1 交替）
-- 写完 + 校验通过才会切换 boot 分区
-- 任何错误（网络中断、校验失败、空间不够）都不会影响**当前正在运行**的固件，设备保持可用
-- **NVS 不动**：WiFi、HomeKit 配对、标定、设置全部保留
+### 4. 第一次开机
+
+1. **WiFi 配网**：上电后 LED **橙色闪烁** → 手机连 WiFi 热点 `AirCover-Setup`（无密码）→ 浏览器打开 `http://192.168.4.1` → 选择家里 WiFi → 保存
+2. **加入家庭网络**：设备重启，LED 走 **boot → 蓝色闪烁(连接中) → 黄色呼吸(等待配对) → 绿色(就绪)** → 浏览器打开 `http://aircover.local`
+3. **HomeKit 配对**：iPhone → "家庭" App → 添加配件 → "没有二维码？" → 手动输入 `111-22-333` → 配对完成
 
 ---
 
-## 3. 首次使用流程
+## 🎛️ Web 控制台
 
-1. **上电** → LED 慢闪。设备没有保存的 WiFi，60 秒后自动进入 SoftAP 模式（LED 改为快闪）。
-2. 手机连接 WiFi 热点 `AirCover-Setup`（开放，无密码）。
-3. 浏览器访问 `http://192.168.4.1`（多数手机会自动弹出配网页）。
-4. 选择家里的 WiFi，输入密码，**SAVE & REBOOT**。
-5. 设备重启，加入家庭 WiFi 后：
-   - LED 熄灭
-   - `http://aircover.local` 进入控制面板
-   - **iPhone 打开"家庭"App → 添加配件 → 没有二维码？手动输入** → 输入 `111-22-333`
+访问 `http://aircover.local`（或 IP 地址），会看到深色琥珀色工业风界面：
 
-之后只要 WiFi 没换，每次上电直接连进来。**换 WiFi 的话**：要么远程登录控制面板按"FACTORY RESET"，要么物理长按 BOOT 10 秒；之后会再回到 SoftAP 配网。
+### STATUS 面板
+- 实时显示位置 / 目标 / 步数 / 运动状态 / HomeKit 配对状态 / WiFi
+- `FULL CLOSE` / `HALF` / `FULL OPEN` 一键到位
+- 拖动滑块直接定位
+- 显示两个电机各自的位置（用于检测失同步）
 
----
+### JOG / CALIBRATION 面板
+- 电机选择：**BOTH / LEFT / RIGHT**（用于单独微调某一边）
+- 点动按钮：±10 / ±100 / ±500 步
+- 自定义步数点动
+- 标定按钮：
+  - **SET ZERO HERE** — 当前位置设为 0%
+  - **SET OPEN HERE** — 当前位置设为 100%
+  - **SYNC HERE** — 强制 RIGHT 电机位置 = LEFT 电机位置（解决失同步）
 
-## 4. 标定流程
+### CONFIG 面板
+| 字段 | 说明 |
+|---|---|
+| `STEP PERIOD (us)` | 每半步耗时，默认 1500。越小越快，但 28BYJ-48 低于约 1000us 会失步 |
+| `HOLD WHEN IDLE` | 静止时是否保持线圈通电锁定。默认关（省电不发热）。卷线被拉力拽回去才打开 |
+| `FULL-OPEN STEPS` | 满行程步数。点 SET OPEN HERE 会自动写入，也可手填 |
+| `DETENT STEPS` | 位置吸附粒度（详见下文）。0 = 禁用 |
+| `HOMEKIT NAME` | "家庭" App 里显示的名字 |
+| `HOMEKIT SETUP CODE` | 配对码（`XXX-XX-XXX`）。改后需在"家庭"重新配对 |
 
-设备出厂默认假定 `12288 步`（≈3 圈）= 完全打开。**真实行程必须实地标定一次**：
+### LOG 面板
+- 实时镜像 ESP-IDF 控制台日志（WebSocket 推送），不用拉串口线
+- `CLEAR` 清屏，`AUTOSCROLL` 控制是否跟随尾部
 
-1. 装上电机和卷线，但**先不要绑死**塑料袋上边缘（防止标错导致拉爆）
-2. 浏览器进入 `http://aircover.local`
-3. 在 **JOG / CALIBRATION** 面板，用 `-100` / `+100` 按钮把卷轴**转到"塑料袋完全闭合"位置**
-4. 点击 **SET ZERO HERE** → 当前位置成为 0%
-5. 继续点 `+100` 把卷轴**转到"塑料袋完全打开"位置**
-6. 点击 **SET OPEN HERE** → 当前步数成为 100%
+### FIRMWARE UPDATE 面板
+OTA 远程升级，详见下方。
 
-之后 HomeKit 滑块的 0%/100%、网页上的位置百分比都基于这个标定。
-
-> 想重新标定：随时再走一遍即可。`full_open_steps` 也可以在 CONFIG 面板里直接写入数字。
-
----
-
-## 5. Web 控制面板功能
-
-访问 `http://aircover.local`（或 IP）：
-
-- **STATUS**：实时显示位置 / 目标 / 步数 / 是否运动；点击 `FULL CLOSE` / `HALF` / `FULL OPEN` 或拖动滑块直接移动
-- **JOG / CALIBRATION**：±10 / ±100 / ±500 步点动，自定义步数，零点和全开标定
-- **CONFIG**：
-  - `STEP PERIOD (us)`：每个半步的时间，默认 1500us。值越小越快。**低于 ~1000us 28BYJ-48 会失步**
-  - `HOLD WHEN IDLE`：到位后是否保持线圈通电锁定。默认关（省电、不发热）。如果塑料袋拉力把卷轴往回拽，再打开
-  - `FULL-OPEN STEPS`：直接输入校准后的步数
-  - `HOMEKIT NAME` / `SETUP CODE`：改了之后需要在"家庭"App 里**重新配对**
-- **LOG**：实时镜像 ESP-IDF 串口日志（WebSocket 推送），不需要 USB 调试线
-- **DANGER**：恢复出厂 / 重启
+### DANGER 面板
+- `REBOOT` — 软重启
+- `FACTORY RESET` — 清空所有 NVS（WiFi、配对、标定都没了），重新走配网流程
 
 ---
 
-## 6. HomeKit 行为细节
+## 🔄 OTA 升级
 
-- 服务类型：**Window Covering**（在"家庭"里显示为带 0–100% 滑块的窗帘）
-- 收到目标位置后立即开始移动，`Position State` 设为 `Increasing` / `Decreasing`
-- 到位后 `Current Position = Target`，`Position State = Stopped`
-- 当前位置写入 NVS，掉电后恢复
-- 同一时刻新的目标会覆盖旧目标（线性平滑过渡需要中间态推送，这里没做——28BYJ-48 速度本来就不快，体验也够）
+第一次以外，**所有后续更新都通过浏览器完成**，不用接 USB：
+
+1. 改完代码：`idf.py build`
+2. 浏览器打开 `http://aircover.local`
+3. 滚到 **FIRMWARE UPDATE** 面板
+4. 选择 `build/aircover.bin`，点 **UPLOAD & FLASH**
+5. 进度条走完 → 设备自动重启 → 5 秒后页面恢复连接
+
+**安全保护**：
+- 固件写入**未激活的 OTA 槽**，当前运行的固件不动
+- 校验失败不会切换 boot 分区
+- 网络中断、文件损坏、空间不足，**任何环节出错都不影响当前固件**
+- NVS 不动，WiFi 凭证、HomeKit 配对、标定全部保留
+
+**新增字段不丢配置**：升级后如果 `app_settings_t` 加了新字段，启动时会从 NVS 读旧 blob、新字段保持默认，然后回写新布局。这意味着你可以放心往 settings 里加东西。
 
 ---
 
-## 7. 故障排查
+## 💡 LED 状态参考
+
+板载 WS2812 (GPIO 8) 反映系统状态。所有状态之间有 1 秒颜色平滑过渡：
+
+| 颜色 / 动作 | 含义 |
+|---|---|
+| 暗白常亮 | 启动中 |
+| **蓝色闪烁** (0.6Hz) | 正在连 WiFi |
+| **橙色快闪** (4Hz) | SoftAP 配网模式 |
+| **黄色呼吸** (2s 周期) | WiFi 连上，等待 HomeKit 配对 |
+| **绿色** (5s 后渐变熄灭) | 已配对、就绪 |
+| **蓝色脉冲** (1.5s 周期) | 电机运动中 |
+
+技术细节：颜色定义在感知线性空间，输出前做 gamma 2.2 编码；40Hz 渲染；脉冲/呼吸用余弦波而非三角波——为了让低亮度区也看起来流畅，没有明显的"掉帧"阶梯感。短动作（<25ms）有 latch 保证至少闪一次。
+
+调节参数在 `main/led_indicator.c` 顶部：
+
+```c
+#define TICK_HZ                 40   // 渲染帧率
+#define BLUE_PULSE_TICKS        60   // 1.5s
+#define READY_VISIBLE_TICKS     (5 * TICK_HZ)
+#define TRANSITION_TICKS        (1 * TICK_HZ)
+// gamma 2.2 在 led_indicator_init 里
+```
+
+---
+
+## 🧲 位置吸附 (Detent)
+
+两个电机机械上无法完全同步，每次移动可能有零点几步的小误差。**多次运动后累积**，就会导致两边塑料袋高度不一致。
+
+启用 detent 后，HomeKit 滑块和百分比按钮的目标位置会**吸附到整数倍的网格点**，确保每次停止都落在同一组固定位置上，误差不累积。
+
+举例（`full_open_steps = 12288`）：
+
+| `detent_steps` | 网格点数 | 每档约几度 |
+|---|---|---|
+| 0 | ∞（禁用） | — |
+| 128 | 96 档 / 3 圈 | ≈ 11° |
+| 256 | 48 档 / 3 圈 | ≈ 22.5° |
+| 512 | 24 档 / 3 圈 | ≈ 45° |
+| 1024 | 12 档 / 3 圈 | ≈ 90° |
+
+**只影响 `move_to`，不影响 jog**——点动按钮仍然单步精度，方便微调和标定。
+
+实测建议从 **256** 起步，太粗就降到 128，太细就提到 512。
+
+---
+
+## 🛠️ 配置参考
+
+所有持久配置（`app_settings_t`）：
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `wifi_ssid` / `wifi_pass` | (empty) | WiFi 凭证，SoftAP 配网时写入 |
+| `full_open_steps` | 12288 | 0% → 100% 的总半步数 |
+| `last_position` | 0 | 每次停止后写入，掉电恢复 |
+| `step_period_us` | 1500 | 每半步耗时 |
+| `hold_when_stopped` | false | 静止时是否锁定线圈 |
+| `hap_setup_code` | `111-22-333` | HomeKit 配对码 |
+| `accessory_name` | `AirCover` | HomeKit 配件名 |
+| `detent_steps` | 0 | 吸附粒度，0 = 禁用 |
+
+---
+
+## 🐛 Troubleshooting
 
 | 现象 | 可能原因 | 处理 |
 |---|---|---|
-| 电机不转 / 抖动 | 5V 供电不足，或 ULN2003 没共地 | 用独立 5V 适配器，确认 GND 三方共地 |
-| 转一两秒就失步 | `step_period_us` 太小 | 改回 1500us 或更大 |
-| 一个电机方向反了 | 物理装反 | 把那个电机的两根**相邻** IN 线互换（例如 IN1↔IN3 或 IN2↔IN4） |
-| iPhone 配对失败 | setup code 错或 mDNS 不通 | 确认 setup code，确认手机和设备在同一 LAN，路由器没禁用 mDNS |
-| `aircover.local` 打不开 | 路由器/系统不支持 mDNS | 用串口看分配到的 IP，直接 `http://<ip>` |
-| Web UI 进不去 | WiFi 没连上 | 进 SoftAP 模式（长按 BOOT 10s）重新配网 |
+| 电机不转 / 抖动 | 5V 供电不够，或没共地 | 用独立 5V 电源，三方共地 |
+| 转一会就丢步 | `step_period_us` 太小 | 改回 1500 或更大 |
+| 一个电机方向反了 | 物理接反 | 在该电机引脚里交换任意两根**相邻**线（如 IN1↔IN3） |
+| 两个电机不同步 | 长期误差累积 | 开 `DETENT STEPS` (从 256 试)，并周期性用 `SYNC HERE` |
+| HomeKit 配对失败 | setup code 错 / mDNS 不通 / 网络隔离 | 确认代码，确认手机和设备同一 LAN，路由器允许 mDNS |
+| `aircover.local` 打不开 | mDNS 不被支持 | Windows 装 Bonjour Print Services；或串口看 IP 直接访问 |
+| Web UI 卡顿 / WS 掉线 | 多个客户端同时连 | 最多支持 4 个并发 WS，关掉别的标签页 |
+| 长按 BOOT 没反应 | 没按够 10 秒 | 确实需要 **10 秒**（防误触） |
+| OTA 上传失败 | 网络中断 / 文件不对 | 重试，文件必须是 `build/aircover.bin` |
 
 ---
 
-## 8. 文件结构
+## 🏗️ 架构
 
 ```
 aircover/
-├── CMakeLists.txt              # 顶层，注入 esp-homekit-sdk 组件路径
-├── partitions.csv              # NVS + factory（2MB app）
-├── sdkconfig.defaults          # ESP-IDF 全项目默认设置
+├── CMakeLists.txt              # 顶层，注入 esp-homekit-sdk
+├── partitions.csv              # NVS + otadata + ota_0/ota_1
+├── sdkconfig.defaults
 └── main/
-    ├── CMakeLists.txt          # 组件级
-    ├── idf_component.yml       # mdns / json 依赖
-    ├── main.c                  # 入口、引脚映射、状态机
-    ├── app_settings.{h,c}      # NVS 持久化（WiFi / 标定 / 参数）
-    ├── stepper.{h,c}           # 28BYJ-48 半步驱动，双电机同步
-    ├── wifi_manager.{h,c}      # STA + SoftAP 配网兜底
-    ├── homekit_service.{h,c}   # Window Covering 服务
-    ├── webui.{h,c}             # HTTP API + WebSocket 日志
-    └── webui_assets.h          # 控制面板 HTML/CSS/JS
+    ├── CMakeLists.txt
+    ├── idf_component.yml       # mdns, led_strip
+    ├── main.c                  # 入口、引脚映射、BOOT 长按、回调
+    ├── app_settings.{h,c}      # NVS 持久化 + 平滑迁移
+    ├── stepper.{h,c}           # 28BYJ-48 半步驱动（双电机独立相位）
+    ├── wifi_manager.{h,c}      # STA + SoftAP 兜底
+    ├── homekit_service.{h,c}   # HAP Window Covering
+    ├── led_indicator.{h,c}     # WS2812 状态机
+    ├── webui.{h,c}             # HTTP API + WebSocket 日志 + OTA
+    └── webui_assets.h          # 控制台 HTML/CSS/JS
 ```
+
+模块依赖关系：`main.c` 是唯一的全局协调者，其他模块互不引用，通过 `main.c` 注册的回调通信。
 
 ---
 
-## 9. 改造提示
+## 🔧 二次开发提示
 
-- **改电机数 / 方向**：编辑 `main.c` 顶部的 `PIN_MOTOR_*` 宏；如要让 B 反转，交换它的两根相邻 IN 引脚即可
-- **改成风扇语义**：在 `homekit_service.c` 把 `hap_serv_window_covering_create` 换成 `hap_serv_fan_create`（但失去 0-100% 滑块体验）
-- **加限位开关**：在 `stepper.c` 的 `timer_cb` 里检查 GPIO，命中时 `s_target = s_current`
-- **加 OTA**：`partitions.csv` 已经给 factory 留了 2MB，要 OTA 改成双 ota 分区 + 加 `esp_https_ota` 调用
+- **改成单电机** — `main.c` 把 `pin_right` 设成 `{-1,-1,-1,-1}`，`stepper.c` 的 timer_cb 已经忽略 -1 引脚
+- **加限位开关** — `stepper.c::timer_cb` 里读 GPIO，命中时 `m->target = m->current`
+- **改成 Fan 服务** — `homekit_service.c` 用 `hap_serv_fan_create`（但失去百分比滑块）
+- **加更多 NVS 字段** — 追加到 `app_settings_t` **末尾**，在 `load_defaults` 给默认值；平滑迁移会自动处理
+- **改 LED 颜色** — `led_indicator.c` 顶部 `COL_*` 常量，定义在感知线性空间
 
-祝玩得开心！
+---
+
+## 📄 License
+
+MIT —— 自由使用、修改、二次分发。仅当作 DIY 参考实现提供，不对任何空调爆炸或塑料袋着火负责。
+
+## 🙏 Acknowledgments
+
+- [esp-homekit-sdk](https://github.com/espressif/esp-homekit-sdk) — Espressif 官方 HAP 实现
+- [ESP-IDF](https://github.com/espressif/esp-idf) — 整个 ESP32 生态
+- 厨房抽油烟机柜门上那块塑料布 — 原型机灵感来源
+
+---
+
+如果这个项目帮到你，欢迎 ⭐ Star；遇到 bug 或想加功能，开 Issue 或 PR。
