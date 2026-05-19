@@ -1,4 +1,8 @@
-# Name,   Type, SubType, Offset,   Size,    Flags
+# Name,   Type, SubType, Offset,   Size,      Flags
+# NVS kept at the original location so existing settings survive the migration.
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x1F0000,
+otadata,  data, ota,     0x10000,  0x2000,
+# Two OTA app slots, ~1.875 MB each. Aligned to 64 KB.
+ota_0,    app,  ota_0,   0x20000,  0x1E0000,
+ota_1,    app,  ota_1,   0x200000, 0x1E0000,

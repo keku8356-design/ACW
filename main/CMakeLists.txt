@@ -16,6 +16,7 @@ idf_component_register(
         esp_http_server
         esp_timer
         esp_hw_support
+        app_update
         mdns
         driver
         esp_hap_core

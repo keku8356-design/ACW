@@ -53,6 +53,28 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 
 > 烧录后 `monitor` 输出里会打印 `HomeKit setup code: 111-22-333`，**第一次配对**就用这个 8 位数字（可在 Web UI 改）。
 
+> **分区表升级（从老版本 factory 分区升级到 OTA 双槽）**：本项目改用 OTA 双槽分区表后，**最后一次需要串口烧录**才能切换。之后所有更新都可通过 Web UI 远程刷写。`idf.py flash` 会自动重写分区表和 NVS 区，**WiFi 凭证和 HomeKit 配对会丢**，需要重新配网和配对一次。再之后就纯远程 OTA，不丢配置。
+
+### 2.3 远程 OTA 升级
+
+每次代码修改后：
+
+```bash
+idf.py build
+```
+
+然后在浏览器打开 `http://aircover.local` → **FIRMWARE UPDATE** 面板：
+
+1. 点 "Choose File"，选 `build/aircover.bin`
+2. 点 **UPLOAD & FLASH**，确认对话框
+3. 进度条走完后设备自动重启，5 秒后页面恢复
+
+OTA 行为：
+- 固件写入**未激活**的 OTA 槽（ota_0 / ota_1 交替）
+- 写完 + 校验通过才会切换 boot 分区
+- 任何错误（网络中断、校验失败、空间不够）都不会影响**当前正在运行**的固件，设备保持可用
+- **NVS 不动**：WiFi、HomeKit 配对、标定、设置全部保留
+
 ---
 
 ## 3. 首次使用流程

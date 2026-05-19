@@ -4,10 +4,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -182,8 +185,10 @@ static esp_err_t h_status(httpd_req_t *r)
     int32_t full   = cfg->full_open_steps;
     int     pct    = full > 0 ? (int)((int64_t)pos * 100 / full) : 0;
     int     pct_t  = full > 0 ? (int)((int64_t)tgt * 100 / full) : 0;
-    if (pct < 0)   pct = 0; if (pct > 100)   pct = 100;
-    if (pct_t < 0) pct_t = 0; if (pct_t > 100) pct_t = 100;
+    if (pct < 0)   pct = 0;
+    if (pct > 100)   pct = 100;
+    if (pct_t < 0) pct_t = 0;
+    if (pct_t > 100) pct_t = 100;
 
     char buf[640];
     int n = snprintf(buf, sizeof(buf),
@@ -339,6 +344,87 @@ static esp_err_t h_reboot(httpd_req_t *r)
     return ESP_OK;
 }
 
+/* ---- OTA --------------------------------------------------------------
+ * Accepts the raw firmware .bin as the POST body. The browser uploads with
+ * XMLHttpRequest so it can show an upload-progress bar.
+ *
+ * Flow: open next OTA partition -> stream-write the body -> verify ->
+ *       set boot partition -> reboot. On any error, esp_ota_abort() and
+ *       leave the running slot untouched so the device stays bootable.
+ *
+ * NOTE: there is no authentication here. The Web UI is open on the local
+ * network. For DIY home use this is the usual trade-off; if exposing the
+ * device beyond the LAN you'll want at least an HTTP basic-auth wrapper. */
+static esp_err_t h_ota(httpd_req_t *r)
+{
+    const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
+    if (!update) {
+        ESP_LOGE(TAG, "no OTA partition available");
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "no OTA partition (still on factory image?)");
+    }
+    ESP_LOGI(TAG, "OTA target: '%s' @ 0x%" PRIx32 " size=%" PRIu32 " incoming=%d bytes",
+             update->label, update->address, update->size, r->content_len);
+
+    if (r->content_len <= 0 || r->content_len > (int)update->size) {
+        ESP_LOGE(TAG, "OTA: bad content_len %d", r->content_len);
+        return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "bad content length");
+    }
+
+    esp_ota_handle_t handle = 0;
+    esp_err_t err = esp_ota_begin(update, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+
+    char buf[1536];
+    int  total = 0;
+    int  last_logged = -1;
+    while (total < r->content_len) {
+        int n = httpd_req_recv(r, buf, sizeof(buf));
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) {
+            ESP_LOGE(TAG, "OTA recv error at %d/%d", total, r->content_len);
+            esp_ota_abort(handle);
+            return httpd_resp_send_500(r);
+        }
+        err = esp_ota_write(handle, buf, n);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write failed at %d: %s", total, esp_err_to_name(err));
+            esp_ota_abort(handle);
+            return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       esp_err_to_name(err));
+        }
+        total += n;
+        int pct = (int)((int64_t)total * 100 / r->content_len);
+        if (pct / 10 != last_logged) {
+            ESP_LOGI(TAG, "OTA: %d%% (%d / %d bytes)", pct, total, r->content_len);
+            last_logged = pct / 10;
+        }
+    }
+
+    err = esp_ota_end(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    err = esp_ota_set_boot_partition(update);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+
+    ESP_LOGW(TAG, "OTA complete (%d bytes); rebooting into '%s'", total, update->label);
+    httpd_resp_set_type(r, "application/json");
+    httpd_resp_sendstr(r, "{\"ok\":true}");
+    xTaskCreate(deferred_reboot, "reboot", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+
 /* ---- WebSocket handler ------------------------------------------------ */
 
 static esp_err_t h_ws(httpd_req_t *r)
@@ -415,6 +501,7 @@ esp_err_t webui_start(void)
         {.uri = "/api/config",    .method = HTTP_POST, .handler = h_config},
         {.uri = "/api/reset",     .method = HTTP_POST, .handler = h_reset},
         {.uri = "/api/reboot",    .method = HTTP_POST, .handler = h_reboot},
+        {.uri = "/api/ota",       .method = HTTP_POST, .handler = h_ota},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i)
         httpd_register_uri_handler(s_httpd, &routes[i]);
