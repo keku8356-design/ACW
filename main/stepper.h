@@ -65,6 +65,11 @@ void stepper_set_position(motor_id_t which, int32_t pos);
 void stepper_set_period(uint32_t us);
 void stepper_set_hold  (bool hold);
 
+/* Position quantisation. When `steps` > 0, stepper_move_to() targets are
+ * rounded to the nearest multiple. Pass 0 to disable. Has no effect on
+ * stepper_jog_motor() so manual trimming stays at single-step precision. */
+void stepper_set_detent(int32_t steps);
+
 void stepper_register_done_cb (stepper_done_cb_t  cb);
 void stepper_register_start_cb(stepper_start_cb_t cb);
 

@@ -23,6 +23,7 @@ static void load_defaults(app_settings_t *c)
      * It is fine for development; the user can change it via Web UI later. */
     strcpy(c->hap_setup_code, "111-22-333");
     strcpy(c->accessory_name, "AirCover");
+    c->detent_steps = 0;                 /* off by default */
 }
 
 esp_err_t app_settings_init(void)
@@ -37,20 +38,53 @@ esp_err_t app_settings_init(void)
     }
     if (err != ESP_OK) return err;
 
-    size_t sz = sizeof(s_cfg);
-    err = nvs_get_blob(h, KEY_BLOB, &s_cfg, &sz);
+    /* Forward-compatible NVS read:
+     *
+     *   1. Query the stored blob length.
+     *   2. Pre-fill s_cfg with defaults so any field added in a newer firmware
+     *      version that isn't present in the saved blob keeps its default.
+     *   3. Copy at most sizeof(s_cfg) bytes from NVS over the top.
+     *
+     * This means we can append fields to app_settings_t in new firmware and
+     * old NVS blobs still load cleanly across an OTA update. Two rules:
+     *   - Never reorder existing fields, only append.
+     *   - load_defaults() must give every new field a sensible default. */
+    size_t stored_sz = 0;
+    err = nvs_get_blob(h, KEY_BLOB, NULL, &stored_sz);
+    if (err != ESP_OK) {
+        nvs_close(h);
+        ESP_LOGW(TAG, "NVS blob missing (err=0x%x), using defaults", err);
+        load_defaults(&s_cfg);
+        return ESP_OK;
+    }
+
+    load_defaults(&s_cfg);
+    size_t to_read = stored_sz < sizeof(s_cfg) ? stored_sz : sizeof(s_cfg);
+    err = nvs_get_blob(h, KEY_BLOB, &s_cfg, &to_read);
     nvs_close(h);
 
-    if (err != ESP_OK || sz != sizeof(s_cfg)) {
-        ESP_LOGW(TAG, "NVS blob missing/size-mismatch (err=0x%x sz=%u), using defaults", err, (unsigned)sz);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS read failed (err=0x%x), using defaults", err);
         load_defaults(&s_cfg);
-    } else {
-        ESP_LOGI(TAG, "loaded: wifi=%s full_open=%d period=%uus hold=%d",
-                 s_cfg.wifi_configured ? "yes" : "no",
-                 (int)s_cfg.full_open_steps,
-                 (unsigned)s_cfg.step_period_us,
-                 (int)s_cfg.hold_when_stopped);
+        return ESP_OK;
     }
+
+    if (stored_sz < sizeof(s_cfg)) {
+        ESP_LOGW(TAG, "NVS blob smaller than struct (%u < %u), new fields kept at defaults",
+                 (unsigned)stored_sz, (unsigned)sizeof(s_cfg));
+        /* Persist immediately so the on-disk blob matches the new layout. */
+        app_settings_save();
+    } else if (stored_sz > sizeof(s_cfg)) {
+        ESP_LOGW(TAG, "NVS blob larger than struct (%u > %u, downgrade?), tail ignored",
+                 (unsigned)stored_sz, (unsigned)sizeof(s_cfg));
+    }
+
+    ESP_LOGI(TAG, "loaded: wifi=%s full_open=%d period=%uus hold=%d detent=%d",
+             s_cfg.wifi_configured ? "yes" : "no",
+             (int)s_cfg.full_open_steps,
+             (unsigned)s_cfg.step_period_us,
+             (int)s_cfg.hold_when_stopped,
+             (int)s_cfg.detent_steps);
     return ESP_OK;
 }
 
@@ -130,5 +164,14 @@ esp_err_t app_settings_set_setup_code(const char *code)
     if (!code || strlen(code) != 10) return ESP_ERR_INVALID_ARG;  /* XXX-XX-XXX */
     strncpy(s_cfg.hap_setup_code, code, sizeof(s_cfg.hap_setup_code) - 1);
     s_cfg.hap_setup_code[sizeof(s_cfg.hap_setup_code) - 1] = '\0';
+    return app_settings_save();
+}
+
+esp_err_t app_settings_set_detent(int32_t steps)
+{
+    if (steps < 0)      steps = 0;
+    /* Cap at half the full travel so at least 2 detents exist when enabled. */
+    if (steps > s_cfg.full_open_steps / 2) steps = s_cfg.full_open_steps / 2;
+    s_cfg.detent_steps = steps;
     return app_settings_save();
 }

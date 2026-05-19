@@ -31,8 +31,23 @@ static esp_timer_handle_t s_timer;
 static bool      s_running   = false;
 static uint32_t  s_period_us = 1500;
 static bool      s_hold      = false;
+static int32_t   s_detent    = 0;          /* 0 = disabled */
 static stepper_done_cb_t  s_done_cb  = NULL;
 static stepper_start_cb_t s_start_cb = NULL;
+
+/* Quantise `v` to the nearest multiple of `d` (round-half-up).
+ *
+ * Handles negative `v` correctly: C's % operator on a negative dividend
+ * can return a negative remainder, so we normalise into [0, d) first.
+ * For d == 0 this is a no-op (detent disabled). */
+static int32_t snap_to_detent(int32_t v, int32_t d)
+{
+    if (d <= 0) return v;
+    int32_t r = v % d;
+    if (r < 0) r += d;
+    /* r is now in [0, d). Pick the closer of (v - r) and (v - r + d). */
+    return (r * 2 < d) ? (v - r) : (v - r + d);
+}
 
 /* --- low-level helpers --------------------------------------------------- */
 
@@ -139,18 +154,24 @@ esp_err_t stepper_init(const stepper_pins_t *pins, int32_t start_position)
 
 void stepper_move_to(int32_t target)
 {
+    int32_t snapped = snap_to_detent(target, s_detent);
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_motor[M_LEFT ].target = target;
-    s_motor[M_RIGHT].target = target;
-    if (s_motor[M_LEFT ].current != target ||
-        s_motor[M_RIGHT].current != target) {
+    s_motor[M_LEFT ].target = snapped;
+    s_motor[M_RIGHT].target = snapped;
+    if (s_motor[M_LEFT ].current != snapped ||
+        s_motor[M_RIGHT].current != snapped) {
         ensure_running_locked();
     }
     xSemaphoreGive(s_lock);
-    ESP_LOGI(TAG, "move_to %d (L=%d R=%d)",
-             (int)target,
-             (int)s_motor[M_LEFT].current,
-             (int)s_motor[M_RIGHT].current);
+    if (snapped != target) {
+        ESP_LOGI(TAG, "move_to %d -> snapped %d (detent=%d)",
+                 (int)target, (int)snapped, (int)s_detent);
+    } else {
+        ESP_LOGI(TAG, "move_to %d (L=%d R=%d)",
+                 (int)target,
+                 (int)s_motor[M_LEFT].current,
+                 (int)s_motor[M_RIGHT].current);
+    }
 }
 
 void stepper_jog_motor(motor_id_t which, int32_t delta)
@@ -238,6 +259,13 @@ void stepper_set_hold(bool hold)
         if (!s_running) deenergize_all();
         xSemaphoreGive(s_lock);
     }
+}
+
+void stepper_set_detent(int32_t steps)
+{
+    if (steps < 0) steps = 0;
+    s_detent = steps;
+    ESP_LOGI(TAG, "detent = %d steps (0 = disabled)", (int)steps);
 }
 
 void stepper_register_done_cb (stepper_done_cb_t  cb) { s_done_cb  = cb; }

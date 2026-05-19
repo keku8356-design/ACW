@@ -27,6 +27,20 @@ typedef struct {
     /* --- HomeKit --- */
     char hap_setup_code[11]; /* "XXX-XX-XXX\0" */
     char accessory_name[33]; /* default "AirCover" */
+
+    /* --- Detent / position snap ---
+     * Quantises stepper_move_to() targets to multiples of this many half-steps,
+     * so that motion-stop positions land on a finite set of "azimuths" and
+     * small per-motor errors don't accumulate over time. 0 = disabled.
+     *
+     * Examples for the default full_open_steps=12288 (3 revs):
+     *   detent_steps=256  →  48 detents over the whole travel  (16 per rev)
+     *   detent_steps=128  →  96 detents (32 per rev, fine)
+     *   detent_steps=512  →  24 detents (8 per rev, coarse)
+     *
+     * Note: this field must stay at the END of the struct so that future
+     * additions don't break the NVS migration in app_settings_init(). */
+    int32_t detent_steps;
 } app_settings_t;
 
 /* Load settings from NVS into the in-memory copy; fills defaults if missing. */
@@ -49,6 +63,7 @@ esp_err_t app_settings_set_step_period(uint32_t us);
 esp_err_t app_settings_set_hold(bool hold);
 esp_err_t app_settings_set_name(const char *name);
 esp_err_t app_settings_set_setup_code(const char *code);
+esp_err_t app_settings_set_detent(int32_t steps);
 
 #ifdef __cplusplus
 }

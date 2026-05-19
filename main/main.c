@@ -172,6 +172,7 @@ void app_main(void)
     ESP_ERROR_CHECK(stepper_init(&pins, cfg->last_position));
     stepper_set_period(cfg->step_period_us);
     stepper_set_hold(cfg->hold_when_stopped);
+    stepper_set_detent(cfg->detent_steps);
     stepper_register_start_cb(on_motion_start);
     stepper_register_done_cb (on_motion_done);
 
