@@ -41,6 +41,12 @@ typedef struct {
      * Note: this field must stay at the END of the struct so that future
      * additions don't break the NVS migration in app_settings_init(). */
     int32_t detent_steps;
+
+    /* Reverse the physical rotation direction of both motors without
+     * touching logical position semantics. Use when the mechanism is
+     * installed such that "open" and "close" come out swapped. Toggle
+     * from the Web UI; no recalibration needed. */
+    bool invert_direction;
 } app_settings_t;
 
 /* Load settings from NVS into the in-memory copy; fills defaults if missing. */
@@ -64,6 +70,7 @@ esp_err_t app_settings_set_hold(bool hold);
 esp_err_t app_settings_set_name(const char *name);
 esp_err_t app_settings_set_setup_code(const char *code);
 esp_err_t app_settings_set_detent(int32_t steps);
+esp_err_t app_settings_set_invert(bool invert);
 
 #ifdef __cplusplus
 }

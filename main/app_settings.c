@@ -24,6 +24,7 @@ static void load_defaults(app_settings_t *c)
     strcpy(c->hap_setup_code, "111-22-333");
     strcpy(c->accessory_name, "AirCover");
     c->detent_steps = 0;                 /* off by default */
+    c->invert_direction = false;
 }
 
 esp_err_t app_settings_init(void)
@@ -79,12 +80,13 @@ esp_err_t app_settings_init(void)
                  (unsigned)stored_sz, (unsigned)sizeof(s_cfg));
     }
 
-    ESP_LOGI(TAG, "loaded: wifi=%s full_open=%d period=%uus hold=%d detent=%d",
+    ESP_LOGI(TAG, "loaded: wifi=%s full_open=%d period=%uus hold=%d detent=%d invert=%d",
              s_cfg.wifi_configured ? "yes" : "no",
              (int)s_cfg.full_open_steps,
              (unsigned)s_cfg.step_period_us,
              (int)s_cfg.hold_when_stopped,
-             (int)s_cfg.detent_steps);
+             (int)s_cfg.detent_steps,
+             (int)s_cfg.invert_direction);
     return ESP_OK;
 }
 
@@ -173,5 +175,11 @@ esp_err_t app_settings_set_detent(int32_t steps)
     /* Cap at half the full travel so at least 2 detents exist when enabled. */
     if (steps > s_cfg.full_open_steps / 2) steps = s_cfg.full_open_steps / 2;
     s_cfg.detent_steps = steps;
+    return app_settings_save();
+}
+
+esp_err_t app_settings_set_invert(bool invert)
+{
+    s_cfg.invert_direction = invert;
     return app_settings_save();
 }

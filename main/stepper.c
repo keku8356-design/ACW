@@ -32,6 +32,7 @@ static bool      s_running   = false;
 static uint32_t  s_period_us = 1500;
 static bool      s_hold      = false;
 static int32_t   s_detent    = 0;          /* 0 = disabled */
+static bool      s_invert    = false;      /* reverse coil phase direction */
 static stepper_done_cb_t  s_done_cb  = NULL;
 static stepper_start_cb_t s_start_cb = NULL;
 
@@ -88,8 +89,13 @@ static void timer_cb(void *arg)
     bool any_motion = false;
     for (int m = 0; m < 2; ++m) {
         if (s_motor[m].current == s_motor[m].target) continue;
-        int dir = (s_motor[m].target > s_motor[m].current) ? +1 : -1;
-        s_motor[m].phase = (s_motor[m].phase + dir + 8) & 7;
+        /* `dir` is the logical direction (counter increment), unaffected by
+         * invert. `phase_dir` is the physical coil sequence direction —
+         * flipping it reverses the actual rotation while leaving all
+         * higher-level position semantics intact. */
+        int dir       = (s_motor[m].target > s_motor[m].current) ? +1 : -1;
+        int phase_dir = s_invert ? -dir : dir;
+        s_motor[m].phase = (s_motor[m].phase + phase_dir + 8) & 7;
         write_phase(s_motor[m].pin, HALF_STEP_SEQ[s_motor[m].phase]);
         s_motor[m].current += dir;
         any_motion = true;
@@ -266,6 +272,12 @@ void stepper_set_detent(int32_t steps)
     if (steps < 0) steps = 0;
     s_detent = steps;
     ESP_LOGI(TAG, "detent = %d steps (0 = disabled)", (int)steps);
+}
+
+void stepper_set_invert(bool invert)
+{
+    s_invert = invert;
+    ESP_LOGI(TAG, "direction invert = %d", (int)invert);
 }
 
 void stepper_register_done_cb (stepper_done_cb_t  cb) { s_done_cb  = cb; }

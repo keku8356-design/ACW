@@ -137,7 +137,14 @@ static int json_get_int(const char *body, const char *key, int dflt)
     if (!p) return dflt;
     p = strchr(p, ':');
     if (!p) return dflt;
-    return (int)strtol(p + 1, NULL, 10);
+    ++p;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
+    /* Accept JSON booleans so callers can use the same function for
+     * checkbox-backed fields (otherwise `true`/`false` falls through
+     * strtol and silently returns 0). */
+    if (strncmp(p, "true",  4) == 0) return 1;
+    if (strncmp(p, "false", 5) == 0) return 0;
+    return (int)strtol(p, NULL, 10);
 }
 
 static bool json_get_str(const char *body, const char *key, char *out, size_t outsz)
@@ -196,7 +203,7 @@ static esp_err_t h_status(httpd_req_t *r)
         "\"position_left\":%d,\"position_right\":%d,"
         "\"percent\":%d,\"target_percent\":%d,\"moving\":%s,"
         "\"step_period_us\":%u,\"hold_when_stopped\":%s,"
-        "\"detent_steps\":%d,"
+        "\"detent_steps\":%d,\"invert_direction\":%s,"
         "\"hk_paired\":%s,\"name\":\"%s\",\"setup_code\":\"%s\"}",
         (int)pos, (int)tgt, (int)full,
         (int)pos_l, (int)pos_r,
@@ -205,6 +212,7 @@ static esp_err_t h_status(httpd_req_t *r)
         (unsigned)cfg->step_period_us,
         cfg->hold_when_stopped ? "true" : "false",
         (int)cfg->detent_steps,
+        cfg->invert_direction ? "true" : "false",
         s_hk_paired ? "true" : "false",
         cfg->accessory_name, cfg->hap_setup_code);
 
@@ -300,6 +308,7 @@ static esp_err_t h_config(httpd_req_t *r)
     int hold     = json_get_int (body, "hold_when_stopped", -1);
     int fopen    = json_get_int (body, "full_open_steps",   -1);
     int detent   = json_get_int (body, "detent_steps",      -1);
+    int invert   = json_get_int (body, "invert_direction",  -1);
     if (period > 0) {
         app_settings_set_step_period(period);
         stepper_set_period(period);
@@ -313,6 +322,10 @@ static esp_err_t h_config(httpd_req_t *r)
         app_settings_set_detent(detent);
         /* Re-read after the setter so we pass the clamped value down. */
         stepper_set_detent(app_settings_get()->detent_steps);
+    }
+    if (invert >= 0) {
+        app_settings_set_invert(invert ? true : false);
+        stepper_set_invert(invert ? true : false);
     }
 
     char nm[33] = {0}, code[11] = {0};

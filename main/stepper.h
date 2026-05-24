@@ -70,6 +70,12 @@ void stepper_set_hold  (bool hold);
  * stepper_jog_motor() so manual trimming stays at single-step precision. */
 void stepper_set_detent(int32_t steps);
 
+/* Reverse physical rotation direction without touching logical position.
+ * When enabled, the coil phase sequence advances in the opposite direction
+ * but `current`/`target` counts increment the same way as before, so all
+ * higher-level code (HomeKit, Web UI, calibration, detent) stays unaware. */
+void stepper_set_invert(bool invert);
+
 void stepper_register_done_cb (stepper_done_cb_t  cb);
 void stepper_register_start_cb(stepper_start_cb_t cb);
 
