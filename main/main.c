@@ -46,7 +46,10 @@ static const char *TAG = "main";
 #define PIN_RGB_LED   8
 
 #define BOOT_HOLD_MS_FOR_FACTORY_RESET   10000
-#define WIFI_STA_TIMEOUT_MS              60000
+/* Router is expected to be fully up within ~5 min of a shared power cut;
+ * give it 6 to leave headroom for DHCP + association after it appears.
+ * The STA layer retries every few seconds for the whole window. */
+#define WIFI_STA_TIMEOUT_MS              360000
 #define SOFTAP_SSID                      "AirCover-Setup"
 #define MDNS_HOSTNAME                    "aircover"
 

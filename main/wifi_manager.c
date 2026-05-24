@@ -7,6 +7,7 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -17,15 +18,30 @@
 static const char *TAG = "wifi";
 
 #define BIT_CONNECTED   BIT0
-#define BIT_FAILED      BIT1
 
 static EventGroupHandle_t   s_events;
 static wifi_manager_state_t s_state    = WIFI_MODE_NONE;
 static esp_netif_t         *s_sta_netif = NULL;
 static esp_netif_t         *s_ap_netif  = NULL;
 static httpd_handle_t       s_setup_httpd = NULL;
-static int                  s_retry = 0;
-static const int            MAX_RETRY = 5;
+
+/* Reconnect strategy: instead of giving up after a fixed retry count, keep
+ * retrying at a fixed interval for as long as we're in the connecting phase.
+ * Whether we fall back to SoftAP is decided solely by the overall timeout
+ * passed to wifi_manager_start(). This lets the device wait out a slow router
+ * (e.g. both powered from the same outlet after an outage, where the router
+ * takes minutes to come up while the ESP boots in seconds). */
+#define RECONNECT_INTERVAL_MS  5000
+static esp_timer_handle_t   s_reconnect_timer = NULL;
+static volatile bool        s_connecting = false;   /* true during the STA wait window */
+
+static void reconnect_timer_cb(void *arg)
+{
+    if (s_connecting) {
+        ESP_LOGI(TAG, "retrying STA connect...");
+        esp_wifi_connect();
+    }
+}
 
 /* --- Captive-portal-style HTML, fully self-contained (no internet needed) - */
 static const char SETUP_PAGE[] =
@@ -88,17 +104,20 @@ static void on_wifi_event(void* arg, esp_event_base_t base, int32_t id, void* da
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry < MAX_RETRY) {
-            ++s_retry;
-            ESP_LOGW(TAG, "STA disconnected, retry %d/%d", s_retry, MAX_RETRY);
-            esp_wifi_connect();
-        } else {
-            xEventGroupSetBits(s_events, BIT_FAILED);
+        /* Keep trying on a fixed interval while still in the connecting window.
+         * The reconnect is deferred via a one-shot timer rather than calling
+         * esp_wifi_connect() straight back, both to space out attempts and to
+         * avoid hammering connect() from inside the event task. */
+        if (s_connecting) {
+            ESP_LOGW(TAG, "STA disconnected, will retry in %d ms",
+                     RECONNECT_INTERVAL_MS);
+            esp_timer_stop(s_reconnect_timer);   /* harmless if not running */
+            esp_timer_start_once(s_reconnect_timer,
+                                 (uint64_t)RECONNECT_INTERVAL_MS * 1000);
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t*)data;
         ESP_LOGI(TAG, "STA got IP " IPSTR, IP2STR(&ev->ip_info.ip));
-        s_retry = 0;
         xEventGroupSetBits(s_events, BIT_CONNECTED);
     }
 }
@@ -232,23 +251,41 @@ esp_err_t wifi_manager_start(uint32_t sta_timeout_ms, const char *ap_ssid)
 
     const app_settings_t *cfg = app_settings_get();
     if (cfg->wifi_configured && cfg->wifi_ssid[0]) {
-        ESP_LOGI(TAG, "connecting to stored SSID '%s'", cfg->wifi_ssid);
+        ESP_LOGI(TAG, "connecting to stored SSID '%s' (will retry every %d s for up to %u s)",
+                 cfg->wifi_ssid, RECONNECT_INTERVAL_MS / 1000,
+                 (unsigned)(sta_timeout_ms / 1000));
         wifi_config_t stac = {0};
         strncpy((char*)stac.sta.ssid,     cfg->wifi_ssid, sizeof(stac.sta.ssid));
         strncpy((char*)stac.sta.password, cfg->wifi_pass, sizeof(stac.sta.password));
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &stac));
+
+        const esp_timer_create_args_t targs = {
+            .callback = reconnect_timer_cb,
+            .name     = "wifi_reconnect",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&targs, &s_reconnect_timer));
+
+        s_connecting = true;
         ESP_ERROR_CHECK(esp_wifi_start());
 
         s_state = WIFI_MODE_STA_CONNECTING;
+        /* Wait the whole window for a successful connection. The retry timer
+         * keeps re-attempting in the background; only a real GOT_IP sets the
+         * bit. If the window elapses with no connection, fall back. */
         EventBits_t bits = xEventGroupWaitBits(
-            s_events, BIT_CONNECTED | BIT_FAILED, pdFALSE, pdFALSE,
+            s_events, BIT_CONNECTED, pdFALSE, pdFALSE,
             pdMS_TO_TICKS(sta_timeout_ms));
+
+        s_connecting = false;
+        esp_timer_stop(s_reconnect_timer);
+
         if (bits & BIT_CONNECTED) {
             s_state = WIFI_MODE_STA_CONNECTED;
             return ESP_OK;
         }
-        ESP_LOGW(TAG, "STA connect timed out, falling back to SoftAP");
+        ESP_LOGW(TAG, "STA connect timed out after %u s, falling back to SoftAP",
+                 (unsigned)(sta_timeout_ms / 1000));
         esp_wifi_stop();
     }
 
